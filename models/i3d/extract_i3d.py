@@ -46,6 +46,18 @@ class ExtractI3D(BaseExtractor):
             PILToTensor(),
             ToFloat(),
         ])
+        self.augment_transforms = torch.compile(
+            torchvision.transforms.Compose([
+                torchvision.transforms.Resize((1080, 1920)),
+                torchvision.transforms.RandomHorizontalFlip(p=0.5),  # 50% chance of flipping
+                torchvision.transforms.ColorJitter(
+                    brightness=0.2,  # Brightness range from [0.8, 1.2]
+                    contrast=0.2,  # Contrast range from [0.8, 1.2]
+                    saturation=0.2,  # Saturation range from [0.8, 1.2]
+                    hue=0.1  # Hue shift in range [-0.1, 0.1]
+                )        
+            ])
+        )
         self.i3d_transforms = {
             'rgb': torchvision.transforms.Compose([
                 TensorCenterCrop(self.central_crop_size),
@@ -104,6 +116,7 @@ class ExtractI3D(BaseExtractor):
                 # preprocess the image
                 rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
                 rgb = self.resize_transforms(rgb)
+                rgb = self.augment_transforms(rgb)
                 rgb = rgb.unsqueeze(0)
 
                 if self.flow_type == 'raft' and padder is None:
@@ -123,19 +136,24 @@ class ExtractI3D(BaseExtractor):
                     stack_counter += 1
                     timestamps_ms.append(cap.get(cv2.CAP_PROP_POS_MSEC))
             else:
-                # we don't run inference if the stack is not full (applicable for i3d)
+                # repeat last frame to pad it to the stack size
+                while len(rgb_stack) < self.stack_size:
+                    rgb_stack.append(rgb_stack[-1])
+                
+                # run inference
+                batch_feats_dict = self.run_on_a_stack(rgb_stack, stack_counter, padder)
+                for stream in self.streams:
+                    feats_dict[stream].extend(batch_feats_dict[stream].tolist())
+                timestamps_ms.append(cap.get(cv2.CAP_PROP_POS_MSEC))
                 cap.release()
                 break
 
-        # removes the video with different fps if it was created to preserve disk space
-        if (self.extraction_fps is not None) and (not self.keep_tmp_files):
-            os.remove(video_path)
-
+                
         # transforms list of features into a np array
         feats_dict = {stream: np.array(feats) for stream, feats in feats_dict.items()}
         # also include the timestamps and fps
-        feats_dict['fps'] = np.array(fps)
-        feats_dict['timestamps_ms'] = np.array(timestamps_ms)
+        #feats_dict['fps'] = np.array(fps)
+        #feats_dict['timestamps_ms'] = np.array(timestamps_ms)
 
         return feats_dict
 
@@ -164,7 +182,7 @@ class ExtractI3D(BaseExtractor):
             # extract features for a stream
             batch_feats_dict[stream] = models[stream](stream_slice, features=True)  # (B, 1024)
             # add features to the output dict
-            self.maybe_show_pred(stream_slice, self.name2module['model'][stream], stack_counter)
+            #self.maybe_show_pred(stream_slice, self.name2module['model'][stream], stack_counter)
 
         return batch_feats_dict
 
@@ -189,7 +207,7 @@ class ExtractI3D(BaseExtractor):
             else:
                 raise NotImplementedError(f'Flow model {self.flow_type} is not implemented')
             # Preprocess state dict
-            state_dict = torch.load(flow_model_paths[self.flow_type], map_location='cpu')
+            state_dict = torch.load(flow_model_paths[self.flow_type], map_location=self.device)
             state_dict = dp_state_to_normal(state_dict)
             flow_xtr_model.load_state_dict(state_dict)
             flow_xtr_model = flow_xtr_model.to(self.device)
@@ -200,7 +218,7 @@ class ExtractI3D(BaseExtractor):
         i3d_stream_models = {}
         for stream in self.streams:
             i3d_stream_model = I3D(num_classes=self.i3d_classes_num, modality=stream)
-            i3d_stream_model.load_state_dict(torch.load(i3d_weights_paths[stream], map_location='cpu'))
+            i3d_stream_model.load_state_dict(torch.load(i3d_weights_paths[stream], map_location=self.device))
             i3d_stream_model = i3d_stream_model.to(self.device)
             i3d_stream_model.eval()
             i3d_stream_models[stream] = i3d_stream_model

@@ -88,7 +88,8 @@ class BaseExtractor(object):
                 if key != 'fps' and len(value) == 0:
                     print(f'Warning: the value is empty for {key} @ {fpath}')
                 # save the info behind the each key
-                action2savefn[self.on_extraction](fpath, value)
+                if key != 'fps' and key != 'timestamps_ms':
+                    action2savefn[self.on_extraction](fpath, value)
             else:
                 raise NotImplementedError(f'on_extraction: {self.on_extraction} is not implemented')
 
